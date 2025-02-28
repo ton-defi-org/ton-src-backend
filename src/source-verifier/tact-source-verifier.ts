@@ -1,6 +1,6 @@
 import path from "path";
 import semver from "semver";
-import type { verify as VerifyFunctionLegacy } from "tact-1.4.0";
+import type { TactLogger, verify as VerifyFunctionLegacy } from "tact-1.4.0";
 import { Logger, PackageFileFormat } from "tact-1.4.1";
 import type { verify as VerifyFunction } from "tact-1.5.2";
 import { Cell } from "ton";
@@ -8,6 +8,7 @@ import { getSupportedVersions } from "../fetch-compiler-versions";
 import { CompileResult, SourceVerifier, SourceVerifyPayload } from "../types";
 import { timeoutPromise } from "../utils";
 import { getLogger } from "../logger";
+import { verifyTactNew } from "./verify";
 
 const logger = getLogger("tact-source-verifier");
 
@@ -30,6 +31,24 @@ class OutputAppendingLogger extends Logger {
   }
   error(message: string | Error): void {
     this.messages.push(message);
+  }
+}
+
+type VerifyFunctionType =
+  | typeof VerifyFunctionLegacy
+  | typeof VerifyFunction
+  | ReturnType<typeof verifyTactNew>;
+
+async function dispatchVerify(version: string, output: string[]): Promise<VerifyFunctionType> {
+  try {
+    if (version < "1.6.0") {
+      return (await import(`tact-${version}`)).verify;
+    } else {
+      return await verifyTactNew(version);
+    }
+  } catch (e) {
+    output.push(`Failed to load tact v${version}. It probably doesn't exist on the server.`);
+    throw e;
   }
 }
 
@@ -97,26 +116,18 @@ export class TactSourceVerifier implements SourceVerifier {
         throw new Error("Unsupported tact version: " + pkgParsed.compiler.version);
       }
 
-      const verify: typeof VerifyFunctionLegacy | typeof VerifyFunction = await import(
-        `tact-${pkgParsed.compiler.version}`
-      )
-        .then((m) => m.verify)
-        .catch((e) => {
-          output.push(
-            `Failed to load tact v${pkgParsed.compiler.version}. It probably doesn't exist on the server.`,
-          );
-          throw e;
-        });
+      const verify = await dispatchVerify(pkgParsed.compiler.version, output);
 
       let vPromise;
 
       if (this.isLegacyLogger(verify, pkgParsed.compiler.version)) {
+        const logger: TactLogger = {
+          log: (message: string) => output.push(message),
+          error: (message: string) => output.push(message),
+        };
         vPromise = verify({
           pkg,
-          logger: {
-            log: (message: string) => output.push(message),
-            error: (message: string) => output.push(message),
-          },
+          logger,
         });
       } else {
         vPromise = verify({
